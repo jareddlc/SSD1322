@@ -2,17 +2,15 @@
 // The two important functions needed are ssd1322_lvgl_flush and ssd1322_lvgl_align_area.
 // These functions are for telling LVGL how to write to the display correctly.
 
-// std
-#include <stdio.h>
+// SSD1322
+#include "ssd1322.h"
 
 // esp32
 #include <driver/gpio.h>
 #include <driver/spi_master.h>
-#include <freertos/freertos.h>
-#include <freertos/semphr.h>
+#include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-#include <esp_err.h>
 #include <esp_log.h>
 #include <esp_timer.h>
 
@@ -49,15 +47,14 @@ void ssd1322_lvgl_flush(lv_display_t *display, const lv_area_t *area, uint8_t *p
   oled.set_write_ram();
 
   for (uint16_t x = 0; x < pixels; x++) {
-      uint16_t z = x >> 1;
+    uint16_t z = x >> 1; // Each two pixels go into one byte
+    uint8_t pixel_4bit = buf[x] >> 4; // Conversion from 8-bit (0-255) to 4-bit (0-15)
 
-      if (x & 1u) {
-          pixel_buff[z] &= ~0x0f;
-          pixel_buff[z] |= buf[x] >> 4;
-      } else {
-          pixel_buff[z] &= ~0xf0;
-          pixel_buff[z] |= buf[x] << 4;
-      }
+    if (x & 1u) {
+        pixel_buff[z] |= pixel_4bit;  // Store lower 4 bits
+    } else {
+        pixel_buff[z] = (pixel_4bit << 4);  // Store upper 4 bits
+    }
   }
 
   oled.send_ssd1322_data_buffer(pixel_buff, bytes);
@@ -65,7 +62,7 @@ void ssd1322_lvgl_flush(lv_display_t *display, const lv_area_t *area, uint8_t *p
 }
 
 void ssd1322_lvgl_align_area(lv_event_t *e) {
-  lv_area_t *area = (lv_area_t *)e->param;
+  auto *area = (lv_area_t *) lv_event_get_param(e);
 
   area->x1 &= ~3;
   area->x2 = ((area->x2 + 4) & ~3) - 1;
@@ -81,11 +78,11 @@ void init_display() {
   // configure display and set render callbacks
   disp = lv_display_create(SCREEN_WIDTH, SCREEN_HEIGHT);
   lv_display_set_flush_cb(disp, ssd1322_lvgl_flush);
-  lv_display_add_event_cb(disp, ssd1322_lvgl_align_area, LV_EVENT_INVALIDATE_AREA, NULL);
+  lv_display_add_event_cb(disp, ssd1322_lvgl_align_area, LV_EVENT_INVALIDATE_AREA, nullptr);
 
   disp_buf = (uint8_t *)heap_caps_aligned_alloc(4, disp_buff_size, MALLOC_CAP_8BIT);
   pixel_buff = (uint8_t *)heap_caps_aligned_alloc(4, pixel_buff_size, MALLOC_CAP_8BIT | MALLOC_CAP_DMA);
-  lv_display_set_buffers(disp, disp_buf, NULL, disp_buff_size, LV_DISPLAY_RENDER_MODE_PARTIAL);
+  lv_display_set_buffers(disp, disp_buf, nullptr, disp_buff_size, LV_DISPLAY_RENDER_MODE_PARTIAL);
   lv_display_set_color_format(disp, LV_COLOR_FORMAT_L8); // IMPORTANT
 
   // create timer
@@ -102,13 +99,13 @@ void init_display() {
 }
 
 // main
-extern "C" void app_main(void) {
+extern "C" [[noreturn]] void app_main(void) {
   // init and configure display
   init_display();
 
   // use lvgl here
 
-  while (1) {
+  while (true) {
     vTaskDelay(pdMS_TO_TICKS(1));
     lv_timer_periodic_handler();
   }

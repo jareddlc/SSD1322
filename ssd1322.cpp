@@ -1,5 +1,5 @@
 #include <ssd1322.h>
-#include <stdio.h>
+#include <cstdio>
 
 // cs - SPI chip select
 // dc - SPI data/command
@@ -68,7 +68,7 @@ void SSD1322::init(int columns, int rows) {
   // create SPI device
   spi_device_interface_config_t devcfg = {};
   devcfg.spics_io_num = this->cs;
-  devcfg.clock_speed_hz = SPI_MASTER_FREQ_8M;
+  devcfg.clock_speed_hz = SPI_MASTER_FREQ_8M; // Can handle 20 MHz
   devcfg.mode = 0;
   devcfg.queue_size = 200;
   devcfg.clock_source = SPI_CLK_SRC_DEFAULT; // SOC_MOD_CLK_APB;
@@ -79,8 +79,8 @@ void SSD1322::init(int columns, int rows) {
   devcfg.cs_ena_posttrans = 0;
   devcfg.cs_ena_pretrans = 0;
   devcfg.flags = 0;
-  devcfg.pre_cb = NULL;
-  devcfg.post_cb = NULL;
+  devcfg.pre_cb = nullptr;
+  devcfg.post_cb = nullptr;
 
   // init SPI
   spi_bus_initialize((spi_host_device_t)this->spi_host, &buscfg, SPI_DMA_CH_AUTO);

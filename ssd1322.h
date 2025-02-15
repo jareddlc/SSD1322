@@ -3,7 +3,7 @@
 
 #include <driver/gpio.h>
 #include <driver/spi_master.h>
-#include <freertos/freertos.h>
+#include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
 class SSD1322 {
