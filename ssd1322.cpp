@@ -43,6 +43,13 @@ void SSD1322::send_ssd1322_data_buffer(const uint8_t *data, size_t length) {
   this->send_spi_transaction(1, data, length);
 }
 
+void SSD1322::send_ssd1322_data_in_chunks(uint8_t *data, size_t length, size_t chunk_size) {
+  for (size_t offset = 0; offset < length; offset += chunk_size) {
+    size_t len = (offset + chunk_size <= length) ? chunk_size : (length - offset);
+    this->send_ssd1322_data_buffer(data + offset, len);
+  }
+}
+
 void SSD1322::init(int columns, int rows) {
   // set oled size
   this->columns = columns;
@@ -64,11 +71,12 @@ void SSD1322::init(int columns, int rows) {
   buscfg.miso_io_num = GPIO_NUM_NC;
   buscfg.quadwp_io_num = GPIO_NUM_NC;
   buscfg.quadhd_io_num = GPIO_NUM_NC;
+  // buscfg.max_transfer_sz = 8192; // for testing
 
   // create SPI device
   spi_device_interface_config_t devcfg = {};
   devcfg.spics_io_num = this->cs;
-  devcfg.clock_speed_hz = SPI_MASTER_FREQ_8M; // Can handle 20 MHz
+  devcfg.clock_speed_hz = SPI_MASTER_FREQ_8M; // can handle 20 MHz
   devcfg.mode = 0;
   devcfg.queue_size = 200;
   devcfg.clock_source = SPI_CLK_SRC_DEFAULT; // SOC_MOD_CLK_APB;
@@ -128,16 +136,36 @@ void SSD1322::reset_device() {
   vTaskDelay(pdMS_TO_TICKS(300));
 }
 
-void SSD1322::fill_ram(unsigned char d) {
-  this->set_column_address(0x00, 0x77);
-  this->set_row_address(0x00, 0x7F);
+// | Resolution | Columns (bytes) | Pixels | Column Address Range | Row Address Range |
+// |------------|-----------------|--------|----------------------|-------------------|
+// | 256 × 64   | 128             | 256    | 0x00 to 0x7F         | 0x00 to 0x3F      |
+// | 480 × 128  | 240             | 480    | 0x00 to 0xEF         | 0x00 to 0x7F      |
+void SSD1322::fill_ram_480_128(unsigned char d) {
+  // the SSD1322 is a 4-bit grayscale display with support up to 480 x 128.
+  // each byte in RAM holds 2 horizontal pixels (because each pixel is 4 bits).
+  // 480 / 2 = 240 bytes per row.
+  this->set_column_address(0x00, 0xEF); // 0xEF = 239 => 240 bytes => 480 pixels
+  this->set_row_address(0x00, 0x7F);    // 0x7F = 127 => 128 rows
   this->set_write_ram();
 
-  unsigned char i, j;
-  for (i = 0; i < 128; i++) {
-    for (j = 0; j < 120; j++) {
+  for (unsigned char row = 0; row < 128; row++) {
+    for (unsigned char col = 0; col < 240; col++) {
+      // 1 byte = 2 pixels
       this->send_ssd1322_data(d);
-      this->send_ssd1322_data(d);
+    }
+  }
+}
+
+void SSD1322::fill_ram(unsigned char d) {
+  // funciont to fill 256 x 64 pixels.
+  // each byte holds 2 horizontal pixels => 256 / 2 = 128 bytes per row.
+  this->set_column_address(0x00, 0x7F); // 0x7F = 127 => 128 bytes => 256 pixels
+  this->set_row_address(0x00, 0x3F);    // 0x3F = 63 => 64 rows
+  this->set_write_ram();
+
+  for (unsigned char row = 0; row < 64; row++) {
+    for (unsigned char col = 0; col < 128; col++) {
+      this->send_ssd1322_data(d);  // 1 byte = 2 pixels
     }
   }
 }
@@ -241,4 +269,59 @@ void SSD1322::set_command_lock(unsigned char d) {
   this->send_ssd1322_data(d);
 }
 
-void SSD1322::test() {}
+void SSD1322::test() {
+  // SSD1322 - 16 gray scale levels supported by embedded 480 x 128 x 4 bit SRAM display buffer
+  // the screen has 256x64 pixels, but each pixel is 4 bits wide.
+  uint8_t col_start = 0;
+  uint8_t col_end = this->columns - 1;
+  uint8_t row_start = 0;
+  uint8_t row_end = this->rows - 1;
+
+  size_t buffer_size = (this->columns * this->rows) / 2;
+  uint8_t* buffer = (uint8_t*)malloc(buffer_size);
+
+  // SSD1322 column addressing basics:
+  // each RAM column (1 byte) = 2 horizontal pixels, each 4 bits wide.
+  // the SSD1322 has 480 columns of pixels, which equals 240 bytes of column RAM.
+  // but the SSD1322 internally maps RAM columns 0x00 to 0x77 (119 bytes) to the left side of the screen, not the full width.
+  // so to center or align a smaller display like 256×64 in the full 480×128 canvas, you often need to add an offset.
+
+  // 0x1C is decimal 28.
+  // this offset shifts your drawing window to align your logical display with the center of the physical screen.
+  // it's a commonly recommended value in the SSD1322 datasheet and initialization examples for 256-pixel-wide displays.
+
+  // so the set_column_address below, maps your logical column 0 (pixel 0) to RAM column 28, which starts drawing more centrally on the actual display.
+
+  // SD1322 RAM:     0  1  2  ...  28  ...  ...  127  ...  238  239
+  // physical px:   <- unused -> [Your 256x64 display] <- unused ->
+  //                             ↑ start drawing here (offset = 0x1C)
+
+  // set address window (SSD1322 expects byte-based column addressing: divide by 2)
+  this->set_column_address(0x1C + (col_start / 4), 0x1C + (col_end / 4));
+  this->set_row_address(row_start, row_end);
+  this->set_write_ram();
+
+  const int tile_size = 8;
+  const uint8_t grayscales[] = { 0x0, 0x5, 0xA, 0xF };
+  const int num_grayscales = sizeof(grayscales) / sizeof(grayscales[0]);
+
+  int index = 0;
+  for (int row = row_start; row <= row_end; row++) {
+    for (int col = col_start; col <= col_end; col += 2) {
+      // determine tile position
+      int tile_x = col / tile_size;
+      int tile_y = row / tile_size;
+
+      // use XOR of tile coords to alternate pattern
+      int checker_index = (tile_x + tile_y) % num_grayscales;
+      uint8_t gray = grayscales[checker_index];
+
+      // pack two grayscale pixels into one byte
+      uint8_t pixel_byte = (gray << 4) | gray;
+      buffer[index++] = pixel_byte;
+    }
+  }
+
+  this->send_ssd1322_data_in_chunks(buffer, buffer_size, 2048);
+  free(buffer);
+}

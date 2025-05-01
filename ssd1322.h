@@ -12,6 +12,7 @@ public:
   void send_ssd1322_command(unsigned char d);
   void send_ssd1322_data(unsigned char d);
   void send_ssd1322_data_buffer(const uint8_t* data, size_t length);
+  void send_ssd1322_data_in_chunks(uint8_t *data, size_t length, size_t chunk_size);
   void send_spi_transaction(int mode, const uint8_t* data, size_t length);
   void init(int columns, int rows);
   void test();
@@ -19,6 +20,7 @@ public:
   // SSD1322 specific functions
   void reset_device();
   void fill_ram(unsigned char d);
+  void fill_ram_480_128(unsigned char d);
 
   // 10.1.1 Enable Gray Scale Table (00h)
   // 10.1.2 Set Column Address (15h)
