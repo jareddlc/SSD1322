@@ -64,11 +64,13 @@ static void IRAM_ATTR ssd1322_lvgl_flush(lv_display_t *display, const lv_area_t 
   }
 
   // Polling transaction
-  oled.send_ssd1322_data_buffer(pixel_buff, bytes);
+  // oled.send_ssd1322_data_buffer(pixel_buff, bytes);
+  oled.send_ssd1322_data_buffer_chunked(pixel_buff, bytes, 2048);
   lv_display_flush_ready(display);
 
   // Async transaction
   // oled.send_ssd1322_data_buffer_async(pixel_buff, bytes, display);
+  // oled.send_ssd1322_data_buffer_chunked_async(pixel_buff, bytes, 2048, display);
 }
 
 static void IRAM_ATTR ssd1322_lvgl_align_area(lv_event_t *e) {

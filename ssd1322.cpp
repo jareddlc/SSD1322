@@ -76,10 +76,17 @@ void SSD1322::send_ssd1322_data_buffer_async(const uint8_t *data, size_t length,
   this->send_spi_transaction_async(1, data, length, disp);
 }
 
-void SSD1322::send_ssd1322_data_in_chunks(uint8_t *data, size_t length, size_t chunk_size) {
+void SSD1322::send_ssd1322_data_buffer_chunked(uint8_t *data, size_t length, size_t chunk_size) {
   for (size_t offset = 0; offset < length; offset += chunk_size) {
     size_t len = (offset + chunk_size <= length) ? chunk_size : (length - offset);
     this->send_ssd1322_data_buffer(data + offset, len);
+  }
+}
+
+void SSD1322::send_ssd1322_data_buffer_chunked_async(uint8_t *data, size_t length, size_t chunk_size, lv_display_t *disp) {
+  for (size_t offset = 0; offset < length; offset += chunk_size) {
+    size_t len = (offset + chunk_size <= length) ? chunk_size : (length - offset);
+    this->send_ssd1322_data_buffer_async(data + offset, len, disp);
   }
 }
 
@@ -358,6 +365,6 @@ void SSD1322::test() {
     }
   }
 
-  this->send_ssd1322_data_in_chunks(buffer, buffer_size, 2048);
+  this->send_ssd1322_data_buffer_chunked(buffer, buffer_size, 2048);
   free(buffer);
 }
