@@ -1,5 +1,16 @@
 #include <ssd1322.h>
-#include <cstdio>
+#include <stdio.h>
+
+constexpr int MAX_TRANSACTIONS = 2;
+static DRAM_ATTR spi_transaction_t transactions[MAX_TRANSACTIONS] = {0};
+static DRAM_ATTR uint16_t transaction_index = 0;
+
+static void IRAM_ATTR spi_post_cb(spi_transaction_t *transaction) {
+  if (transaction->user == nullptr) {
+    return;
+  }
+  lv_display_flush_ready((lv_display_t *)transaction->user);
+}
 
 // cs - SPI chip select
 // dc - SPI data/command
@@ -7,13 +18,15 @@
 // sclk - SPI Clock
 // sdin - SPI MOSI
 // spi_host - ESP32 SPI host (SPI_HOST = 0 [SPI1], HSPI_HOST = 1 [SPI2], VSPI_HOST = 2 [SPI3])
-SSD1322::SSD1322(int cs, int dc, int reset, int sclk, int sdin, int spi_host) {
+// async - Flag to use async SPI
+SSD1322::SSD1322(int cs, int dc, int reset, int sclk, int sdin, int spi_host, bool async) {
   this->cs = (gpio_num_t)cs;
   this->dc = (gpio_num_t)dc;
   this->reset = (gpio_num_t)reset;
   this->sclk = (gpio_num_t)sclk;
   this->sdin = (gpio_num_t)sdin;
   this->spi_host = spi_host;
+  this->async = async;
 }
 
 void SSD1322::send_spi_transaction(int mode, const uint8_t *data, size_t length) {
@@ -31,6 +44,22 @@ void SSD1322::send_spi_transaction(int mode, const uint8_t *data, size_t length)
   // spi_device_transmit(this->spi, &spi_transaction);
 }
 
+void IRAM_ATTR SSD1322::send_spi_transaction_async(uint8_t mode, const uint8_t *data, size_t length, void *display) {
+  spi_transaction_t *transaction = &transactions[transaction_index];
+  transaction_index = (transaction_index + 1) % MAX_TRANSACTIONS;
+
+  // spi_transaction_t *transaction = (spi_transaction_t*)heap_caps_malloc(sizeof(spi_transaction_t), MALLOC_CAP_DMA);
+  // memset(transaction, 0, sizeof(spi_transaction_t));
+
+  transaction->length = length * 8;
+  transaction->rxlength = 0;
+  transaction->user = (void *)display;
+  transaction->tx_buffer = data;
+
+  gpio_set_level(this->dc, mode);
+  spi_device_queue_trans(this->spi, transaction, portMAX_DELAY);
+}
+
 void SSD1322::send_ssd1322_command(unsigned char d) {
   this->send_spi_transaction(0, &d, 1);
 }
@@ -41,6 +70,10 @@ void SSD1322::send_ssd1322_data(unsigned char d) {
 
 void SSD1322::send_ssd1322_data_buffer(const uint8_t *data, size_t length) {
   this->send_spi_transaction(1, data, length);
+}
+
+void SSD1322::send_ssd1322_data_buffer_async(const uint8_t *data, size_t length, lv_display_t *disp) {
+  this->send_spi_transaction_async(1, data, length, disp);
 }
 
 void SSD1322::send_ssd1322_data_in_chunks(uint8_t *data, size_t length, size_t chunk_size) {
@@ -76,9 +109,8 @@ void SSD1322::init(int columns, int rows) {
   // create SPI device
   spi_device_interface_config_t devcfg = {};
   devcfg.spics_io_num = this->cs;
-  devcfg.clock_speed_hz = SPI_MASTER_FREQ_8M; // can handle 20 MHz
+  devcfg.clock_speed_hz = SPI_MASTER_FREQ_20M; //SPI_MASTER_FREQ_8M
   devcfg.mode = 0;
-  devcfg.queue_size = 200;
   devcfg.clock_source = SPI_CLK_SRC_DEFAULT; // SOC_MOD_CLK_APB;
   devcfg.address_bits = 0;
   devcfg.command_bits = 0;
@@ -89,6 +121,10 @@ void SSD1322::init(int columns, int rows) {
   devcfg.flags = 0;
   devcfg.pre_cb = nullptr;
   devcfg.post_cb = nullptr;
+  devcfg.queue_size = MAX_TRANSACTIONS;
+  if (this->async == true) {
+    devcfg.post_cb = spi_post_cb;
+  }
 
   // init SPI
   spi_bus_initialize((spi_host_device_t)this->spi_host, &buscfg, SPI_DMA_CH_AUTO);

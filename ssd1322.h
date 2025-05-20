@@ -6,14 +6,18 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include <lvgl.h>
+
 class SSD1322 {
 public:
-  SSD1322(int cs, int dc, int reset, int sclk, int sdin, int spi_host);
+  SSD1322(int cs, int dc, int reset, int sclk, int sdin, int spi_host, bool async);
   void send_ssd1322_command(unsigned char d);
   void send_ssd1322_data(unsigned char d);
   void send_ssd1322_data_buffer(const uint8_t* data, size_t length);
+  void send_ssd1322_data_buffer_async(const uint8_t *data, size_t length, lv_display_t *disp);
   void send_ssd1322_data_in_chunks(uint8_t *data, size_t length, size_t chunk_size);
   void send_spi_transaction(int mode, const uint8_t* data, size_t length);
+  void send_spi_transaction_async(uint8_t mode, const uint8_t *data, size_t length, void *disp);
   void init(int columns, int rows);
   void test();
 
@@ -140,6 +144,7 @@ private:
   spi_device_handle_t spi;
   int columns;
   int rows;
+  bool async;
 };
 
 #endif
