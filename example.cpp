@@ -3,43 +3,41 @@
 // These functions are for telling LVGL how to write to the display correctly.
 
 // SSD1322
-#include "ssd1322.h"
+#include <ssd1322.h>
+
+// std
+#include <stdio.h>
 
 // esp32
-#include <driver/gpio.h>
-#include <driver/spi_master.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-
-#include <esp_log.h>
 #include <esp_timer.h>
 
 // graphics
 #include <lvgl.h>
 
-#define TAG "MAIN"
-#define SCREEN_WIDTH 256
-#define SCREEN_HEIGHT 64
-#define LV_TICK_PERIOD_MS 1
+constexpr int SCREEN_WIDTH = 256;
+constexpr int SCREEN_HEIGHT = 64;
+int LV_TICK_PERIOD_MS = 1;
 
-static SSD1322 oled{GPIO_NUM_5, GPIO_NUM_16, GPIO_NUM_17, GPIO_NUM_18, GPIO_NUM_23, VSPI_HOST};
+static SSD1322 oled{GPIO_NUM_17, GPIO_NUM_16, GPIO_NUM_5, GPIO_NUM_18, GPIO_NUM_23, VSPI_HOST}; // ESP32 DevKitC v4
 
-// display and buffer
+// display
 static lv_disp_t *disp;
-static constexpr uint32_t disp_buff_size = (SCREEN_WIDTH * (SCREEN_HEIGHT >> 3));
-static uint8_t *disp_buf;
+static constexpr uint32_t disp_buff_size = (SCREEN_WIDTH * (SCREEN_HEIGHT >> 1));
+static uint8_t *disp_buff_1;
+static uint8_t *disp_buff_2;
 static constexpr uint32_t pixel_buff_size = disp_buff_size >> 1;
 static uint8_t *pixel_buff;
 
-// functions
+// need to call the lv_tick_inc(tick_period) function periodically and provide the call period in milliseconds.
+// for example, lv_tick_inc(1) when calling every millisecond.
 static void lv_tick_task(void *arg) {
   (void)arg;
   lv_tick_inc(LV_TICK_PERIOD_MS);
 }
 
-void ssd1322_lvgl_flush(lv_display_t *display, const lv_area_t *area, uint8_t *px_map) {
-  uint8_t* buf = px_map;
-  uint16_t pixels = ((area->x2 - area->x1) + 1) * ((area->y2 - area->y1) + 1);
+static void IRAM_ATTR ssd1322_lvgl_flush(lv_display_t *display, const lv_area_t *area, uint8_t *px_map) {
+  uint8_t *buf = px_map;
+  uint16_t pixels = ((area->x2 - area->x1) + 1) * ((area->y2 - area->y1) + 1); // why +1?
   uint16_t bytes = pixels >> 1;
 
   oled.set_column_address(0x1C + (area->x1 / 4), 0x1C + (area->x2 / 4));
@@ -47,30 +45,38 @@ void ssd1322_lvgl_flush(lv_display_t *display, const lv_area_t *area, uint8_t *p
   oled.set_write_ram();
 
   for (uint16_t x = 0; x < pixels; x++) {
-    uint16_t z = x >> 1; // Each two pixels go into one byte
-    uint8_t pixel_4bit = buf[x] >> 4; // Conversion from 8-bit (0-255) to 4-bit (0-15)
+    uint16_t z = x >> 1;              // each two pixels go into one byte
+    uint8_t pixel_4bit = buf[x] >> 4; // convert 8-bit (0-255) to 4-bit (0-15)
 
+    // if x is odd
     if (x & 1u) {
-        pixel_buff[z] |= pixel_4bit;  // Store lower 4 bits
+      pixel_buff[z] |= pixel_4bit;        // store lower 4 bits
     } else {
-        pixel_buff[z] = (pixel_4bit << 4);  // Store upper 4 bits
+      pixel_buff[z] = (pixel_4bit << 4);  // store upper 4 bits
     }
   }
 
-  oled.send_ssd1322_data_buffer(pixel_buff, bytes);
-  lv_display_flush_ready(disp);
+  // polling transaction
+  // oled.send_buffer(pixel_buff, bytes);
+  // oled.send_buffer_chunked(pixel_buff, bytes, 2048);
+  // lv_display_flush_ready(display);
+
+  // async transaction
+  oled.send_buffer_async(pixel_buff, bytes, display);
+  // oled.send_buffer_chunked_async(pixel_buff, bytes, 2048, display);
 }
 
-void ssd1322_lvgl_align_area(lv_event_t *e) {
-  auto *area = (lv_area_t *) lv_event_get_param(e);
+static void IRAM_ATTR ssd1322_lvgl_align_area(lv_event_t *e) {
+  lv_area_t *area = (lv_area_t *)lv_event_get_param(e);
 
-  area->x1 &= ~3;
-  area->x2 = ((area->x2 + 4) & ~3) - 1;
+  // ensure area aligns to multiples of 4 pixels horizontally
+  area->x1 &= ~3;                       // align left to 4-pixel boundary
+  area->x2 = ((area->x2 + 4) & ~3) - 1; // align right and subtract 1 for inclusive range
 }
 
-void init_display() {
+extern "C" void app_main(void) {
   // init OLED
-  oled.init(SCREEN_WIDTH, SCREEN_HEIGHT);
+  oled.init(SCREEN_WIDTH, SCREEN_HEIGHT, true);
 
   // init lvgl
   lv_init();
@@ -80,33 +86,57 @@ void init_display() {
   lv_display_set_flush_cb(disp, ssd1322_lvgl_flush);
   lv_display_add_event_cb(disp, ssd1322_lvgl_align_area, LV_EVENT_INVALIDATE_AREA, nullptr);
 
-  disp_buf = (uint8_t *)heap_caps_aligned_alloc(4, disp_buff_size, MALLOC_CAP_8BIT);
-  pixel_buff = (uint8_t *)heap_caps_aligned_alloc(4, pixel_buff_size, MALLOC_CAP_8BIT | MALLOC_CAP_DMA);
-  lv_display_set_buffers(disp, disp_buf, nullptr, disp_buff_size, LV_DISPLAY_RENDER_MODE_PARTIAL);
+  // allocate double buffers with DMA capability
+  disp_buff_1 = (uint8_t *)heap_caps_aligned_alloc(4, disp_buff_size, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+  disp_buff_2 = (uint8_t *)heap_caps_aligned_alloc(4, disp_buff_size, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+  pixel_buff = (uint8_t *)heap_caps_aligned_alloc(4, pixel_buff_size, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+  lv_display_set_buffers(disp, disp_buff_1, disp_buff_2, disp_buff_size, LV_DISPLAY_RENDER_MODE_PARTIAL);
   lv_display_set_color_format(disp, LV_COLOR_FORMAT_L8); // IMPORTANT
 
   // create timer
-  const esp_timer_create_args_t periodic_timer_args = {
-      .callback = &lv_tick_task,
-      .name = "periodic_gui"};
-  esp_timer_handle_t periodic_timer;
-  esp_timer_create(&periodic_timer_args, &periodic_timer);
-  esp_timer_start_periodic(periodic_timer, LV_TICK_PERIOD_MS * 1000);
+  esp_timer_handle_t timer_handle;
+  esp_timer_create_args_t timer_args = {
+    .callback = lv_tick_task,
+    .arg = nullptr,
+    .dispatch_method = ESP_TIMER_TASK,
+    .name = "lv_tick_timer",
+    .skip_unhandled_events = false
+  };
+  esp_timer_create(&timer_args, &timer_handle);
+  esp_timer_start_periodic(timer_handle, LV_TICK_PERIOD_MS * 1000);
 
-  // set display background color and disable scrollbar.
+  // set display background color.
   lv_obj_set_style_bg_color(lv_screen_active(), lv_color_black(), LV_PART_MAIN);
   lv_obj_set_scrollbar_mode(lv_screen_active(), LV_SCROLLBAR_MODE_OFF);
-}
 
-// main
-extern "C" [[noreturn]] void app_main(void) {
-  // init and configure display
-  init_display();
+  // lvgl code
+  static lv_style_t style_bar;
+  static lv_style_t style_bar_indic;
+  static lv_obj_t *bar;
 
-  // use lvgl here
+  lv_style_init(&style_bar);
+  lv_style_set_border_color(&style_bar, lv_color_white());
+  lv_style_set_border_width(&style_bar, 1);
+  lv_style_set_pad_all(&style_bar, 1);
+  lv_style_init(&style_bar_indic);
+  lv_style_set_bg_opa(&style_bar_indic, LV_OPA_COVER);
+  lv_style_set_bg_color(&style_bar_indic, lv_color_hex(0x444444));
+  bar = lv_bar_create(lv_screen_active());
+  lv_obj_remove_style_all(bar);
+  lv_obj_add_style(bar, &style_bar, LV_PART_MAIN);
+  lv_obj_add_style(bar, &style_bar_indic, LV_PART_INDICATOR);
+  lv_obj_set_size(bar, 256, 32);
+  lv_obj_set_pos(bar, 0, 0);
 
-  while (true) {
+  int32_t value = 0;
+  while (1) {
+    value++;
+    lv_bar_set_value(bar, value, LV_ANIM_OFF);
+    if (value >= 100) {
+      value = 0;
+    }
+
+    lv_timer_handler();
     vTaskDelay(pdMS_TO_TICKS(1));
-    lv_timer_periodic_handler();
   }
 }
