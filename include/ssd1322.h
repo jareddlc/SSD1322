@@ -1,15 +1,31 @@
 #ifndef SSD1322_h
 #define SSD1322_h
 
+#include "sdkconfig.h"
 #include <driver/gpio.h>
 #include <driver/spi_master.h>
 
-#include <lvgl.h>
+// check CMake definition for LVGL
+#ifdef SSD1322_HAS_LVGL
+  #include "lvgl.h"
+#endif
+
+typedef struct {
+  gpio_num_t dc_pin;
+  uint8_t mode;
+  void* lv_display;
+} ssd1322_trans_config_t;
+
+typedef void (*spi_callback_t)(spi_transaction_t *t);
 
 class SSD1322 {
 public:
   SSD1322(int cs, int dc, int reset, int sclk, int sdin, int spi_host);
-  void init(int columns, int rows, bool is_async);
+  void init(int columns, int rows, spi_callback_t post_cb = nullptr);
+  void init_sequence();
+  void init_sequence_datasheet();
+
+  // SPI communication
   void send_command(uint8_t d);
   void send_data(uint8_t d);
   void send_buffer(const uint8_t *data, size_t length);
@@ -18,18 +34,21 @@ public:
   void send_buffer_chunked_async(uint8_t *data, size_t length, size_t chunk_size, void *disp);
   void send_spi_transaction(uint8_t mode, const uint8_t *data, size_t length);
   void send_spi_transaction_async(uint8_t mode, const uint8_t *data, size_t length, void *disp);
-  void test();
 
-  // SSD1322 specific functions
+  // SSD1322 hardware control
+  void test();
   void reset_device();
-  void fill_ram(uint8_t d);
+  void fill_ram(int cols, int rows, uint8_t d);
+  void fill_ram_256_64(uint8_t d);
   void fill_ram_480_128(uint8_t d);
 
-  // LVGL specific functions
-  // void lvgl_set_pixel_buffer(uint8_t *buffer);
-  // static void IRAM_ATTR lvgl_align_area(lv_event_t *e);
-  // void IRAM_ATTR lvgl_flush(lv_display_t *display, const lv_area_t *area, uint8_t *px_map);
+  // LVGL specific functions (located in ssd1322_lvgl.cpp)
+  #ifdef SSD1322_HAS_LVGL
+  void lvgl_flush(lv_display_t *display, const lv_area_t *area, uint8_t *px_map, uint8_t *pixel_buff);
+  void lvgl_align_area(lv_event_t *e);
+  #endif
 
+  // command wrappers
   // 10.1.1 Enable Gray Scale Table (00h)
   // 10.1.2 Set Column Address (15h)
   void set_column_address(uint8_t d, uint8_t e);
@@ -39,7 +58,7 @@ public:
   // 10.1.5 Set Row Address (75h)
   void set_row_address(uint8_t d, uint8_t e);
   // 10.1.6 Set Re-map & Dual COM Line Mode (A0h)
-  void set_remap_dual_com_line_mode(uint8_t d);
+  void set_remap_dual_com_line_mode(uint8_t d, uint8_t e);
   // 10.1.7 Set Display Start Line (A1h)
   void set_display_start_line(uint8_t d);
   // 10.1.8 Set Display Offset (A2h)
@@ -109,20 +128,22 @@ public:
     SET_MULTIPLEX_RATIO = 0xCA,
     DISPLAY_ENHANCEMENT_B = 0xD1,
     SET_COMMAND_LOCK = 0xFD,
-    // Display On/Off Options
     DISPLAY_ON = 0xAF,
     DISPLAY_OFF = 0xAE,
-    // Display Mode Commands
     DISPLAY_MODE_OFF = 0xA4,
     DISPLAY_MODE_ON = 0xA5,
     DISPLAY_MODE_NORMAL = 0xA6,
     DISPLAY_MODE_INVERSE = 0xA7,
-    // Options for command lock
     COMMANDS_LOCK = 0x16,
     COMMANDS_UNLOCK = 0x12,
   };
 
+  // offset for 256x64 and 480x128 screens
+  static constexpr uint8_t OFFSET_256_64 = 0x1C;
+  static constexpr uint8_t OFFSET_NONE   = 0x00;
+
 private:
+  // device
   gpio_num_t cs;
   gpio_num_t dc;
   gpio_num_t reset;
@@ -130,10 +151,17 @@ private:
   gpio_num_t sdin;
   int spi_host;
   spi_device_handle_t spi;
+
+  // async pools
+  spi_transaction_t* trans_pool;
+  ssd1322_trans_config_t* trans_config_pool;
+  int queue_size;
+  int curr_trans_idx;
+
+  // screen
   int columns;
   int rows;
-  bool is_async;
-  // uint8_t *pixel_buff;
+  int col_offset;
 };
 
 #endif
