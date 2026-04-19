@@ -1,1 +1,9 @@
-build
+### ESP-IDF
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+
+### Misc
+.DS_Store
+.vscode

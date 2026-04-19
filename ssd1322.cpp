@@ -1,5 +1,8 @@
-#include <ssd1322.h>
-#include <cstdio>
+#include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_attr.h"
+#include "ssd1322.h"
 
 // cs - SPI chip select
 // dc - SPI data/command
@@ -16,44 +19,26 @@ SSD1322::SSD1322(int cs, int dc, int reset, int sclk, int sdin, int spi_host) {
   this->spi_host = spi_host;
 }
 
-void SSD1322::send_spi_transaction(int mode, const uint8_t *data, size_t length) {
-  gpio_set_level(this->dc, mode);
-  spi_transaction_t spi_transaction;
-  spi_transaction.length = length * 8;
-  spi_transaction.tx_buffer = data;
-  spi_transaction.rxlength = 0;
-  spi_transaction.rx_buffer = 0;
-  spi_transaction.addr = 0;
-  spi_transaction.cmd = 0;
-  spi_transaction.flags = 0;
-
-  spi_device_polling_transmit(this->spi, &spi_transaction);
-  // spi_device_transmit(this->spi, &spi_transaction);
-}
-
-void SSD1322::send_ssd1322_command(unsigned char d) {
-  this->send_spi_transaction(0, &d, 1);
-}
-
-void SSD1322::send_ssd1322_data(unsigned char d) {
-  this->send_spi_transaction(1, &d, 1);
-}
-
-void SSD1322::send_ssd1322_data_buffer(const uint8_t *data, size_t length) {
-  this->send_spi_transaction(1, data, length);
-}
-
-void SSD1322::send_ssd1322_data_in_chunks(uint8_t *data, size_t length, size_t chunk_size) {
-  for (size_t offset = 0; offset < length; offset += chunk_size) {
-    size_t len = (offset + chunk_size <= length) ? chunk_size : (length - offset);
-    this->send_ssd1322_data_buffer(data + offset, len);
-  }
-}
-
-void SSD1322::init(int columns, int rows) {
+void SSD1322::init(int columns, int rows, spi_callback_t post_cb) {
   // set oled size
   this->columns = columns;
   this->rows = rows;
+  if (columns == 256) {
+    this->col_offset = OFFSET_256_64;
+  } else {
+    this->col_offset = OFFSET_NONE;
+  }
+
+  // async queue
+  this->queue_size = (post_cb != nullptr) ? 10 : 1;
+  this->curr_trans_idx = 0;
+
+  // allocate the trans config pool
+  this->trans_config_pool = (ssd1322_trans_config_t*)heap_caps_malloc(sizeof(ssd1322_trans_config_t) * queue_size, MALLOC_CAP_DMA);
+
+  // allocate transaction structures in DMA capable RAM
+  this->trans_pool = (spi_transaction_t*)heap_caps_malloc(sizeof(spi_transaction_t) * queue_size, MALLOC_CAP_DMA);
+  memset(this->trans_pool, 0, sizeof(spi_transaction_t) * queue_size);
 
   // initialize GPIO
   gpio_config_t io_conf = {};
@@ -71,14 +56,13 @@ void SSD1322::init(int columns, int rows) {
   buscfg.miso_io_num = GPIO_NUM_NC;
   buscfg.quadwp_io_num = GPIO_NUM_NC;
   buscfg.quadhd_io_num = GPIO_NUM_NC;
-  // buscfg.max_transfer_sz = 8192; // for testing
+  buscfg.max_transfer_sz = 8192;
 
   // create SPI device
   spi_device_interface_config_t devcfg = {};
   devcfg.spics_io_num = this->cs;
-  devcfg.clock_speed_hz = SPI_MASTER_FREQ_8M; // can handle 20 MHz
+  devcfg.clock_speed_hz = SPI_MASTER_FREQ_20M; //SPI_MASTER_FREQ_8M
   devcfg.mode = 0;
-  devcfg.queue_size = 200;
   devcfg.clock_source = SPI_CLK_SRC_DEFAULT; // SOC_MOD_CLK_APB;
   devcfg.address_bits = 0;
   devcfg.command_bits = 0;
@@ -87,8 +71,14 @@ void SSD1322::init(int columns, int rows) {
   devcfg.cs_ena_posttrans = 0;
   devcfg.cs_ena_pretrans = 0;
   devcfg.flags = 0;
-  devcfg.pre_cb = nullptr;
-  devcfg.post_cb = nullptr;
+  devcfg.pre_cb = [](spi_transaction_t *t) {
+    ssd1322_trans_config_t *conf = (ssd1322_trans_config_t*)t->user;
+    if (conf) {
+      gpio_set_level(conf->dc_pin, conf->mode);
+    }
+  };
+  devcfg.post_cb = post_cb;
+  devcfg.queue_size = this->queue_size;
 
   // init SPI
   spi_bus_initialize((spi_host_device_t)this->spi_host, &buscfg, SPI_DMA_CH_AUTO);
@@ -97,34 +87,133 @@ void SSD1322::init(int columns, int rows) {
   this->reset_device();
 
   // initialization sequence
-  this->set_command_lock(this->COMMANDS_UNLOCK);
-  this->set_display_on_off(this->DISPLAY_OFF);
-  this->set_front_clock_divider(0x91); // set clock as 80 frames/sec
-  this->set_multiplex_ratio(0x3F);     // 1/64 duty (0x0F~0x3F)
-  this->set_display_offset(0x00);      // shift mapping ram counter (0x00~0x3F)
-  this->set_display_start_line(0x00);
-  // this->set_function_selection(0x01); // enable internal VDD regulator
-  this->set_remap_dual_com_line_mode(0x14);
-  this->set_function_selection(0x01); // enable internal VDD regulator
-  this->set_display_enhancement_a(0xA0, 0xFD);
-  this->set_contrast_current(0x9F);
-  this->set_master_current_control(0x0F);
-  this->set_default_linear_gray_scale_table();
-  // this->set_contrast_current(0x9F);
-  this->set_phase_length(0xE2); // phase 1 (reset) & phase 2 (pre-charge) period adjustment
-  // this->set_phase_length(0xF2);      // phase 1 (reset) & phase 2 (pre-charge) period adjustment (NHD-2.7-12864WDW3-M datasheet)
-  this->set_precharge_voltage(0x1F); // 0.6*VCC
-  // this->set_display_enhancement_a(0xA0, 0xFD);
-  this->set_vcomh_voltage(0x07); // 0.86*VCC (0x07) (0x04)
-  this->set_display_mode(this->DISPLAY_MODE_NORMAL);
-  this->set_exit_partial_display();
-
-  // clear ram
-  this->fill_ram(0x00);
-  // turn on display
-  this->set_display_on_off(this->DISPLAY_ON);
-
+  this->init_sequence();
+  // let voltages stabilize
   vTaskDelay(pdMS_TO_TICKS(100));
+}
+
+void SSD1322::init_sequence() {
+  // SSD1322 optimized for high contrast & speed
+  this->set_command_lock(this->COMMAND::COMMANDS_UNLOCK);
+  this->set_display_on_off(this->COMMAND::DISPLAY_OFF);
+
+  // timing & driving scheme
+  this->set_front_clock_divider(0xF1);               // High refresh rate for smoother LVGL animations. Other: 0xF2
+  this->set_multiplex_ratio(0x3F);
+  this->set_display_offset(0x00);
+  this->set_display_start_line(0x00);
+  this->set_remap_dual_com_line_mode(0x14, 0x11);    // Standard mapping
+  this->set_function_selection(0x01);                // Internal VDD regulator
+
+  // hardware stability fixes (crucial for 2nd Gen SSD1322)
+  this->set_display_enhancement_a(0xA0, 0xFD);
+  this->set_display_enhancement_b(0x82, 0x20);       // Fixes pixel discharge "ghosting"
+
+  // brightness & grayscale Logic
+  uint8_t gray_scale_table[15] = {40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180};
+  this->set_gray_scale_table(gray_scale_table, 15);
+  this->set_contrast_current(0x9F);                  // High contrast without overdriving (prolongs OLED life). Max: 0xFF
+  this->set_master_current_control(0x0F);            // Max: 0x0F
+
+  // voltage and phase (fine-tuned for sharpe edges)
+  this->set_phase_length(0x32);                      // Sharpens pixel transitions
+  this->set_second_precharge_period(0); // 0x08
+  this->set_precharge_voltage(0x1F);                // 0.6*VCC
+  this->set_vcomh_voltage(0x07);                    // 0.86*VCC - Keeps blacks deep
+
+  // finalize
+  this->set_display_mode(this->COMMAND::DISPLAY_MODE_NORMAL);
+  this->set_exit_partial_display();
+  this->fill_ram_256_64(0x00);
+  this->set_display_on_off(this->COMMAND::DISPLAY_ON);
+}
+
+void SSD1322::init_sequence_datasheet() {
+  // SSD1322 datasheet standard init
+  this->set_command_lock(0x12);                      // Unlock (Command 0xFD)
+  this->set_display_on_off(0xAE);                    // Display OFF (Command 0xAE)
+  this->set_front_clock_divider(0x91);               // 105Hz frame rate (Command 0xB3)
+  this->set_multiplex_ratio(0x3F);                   // 1/64 Duty (Command 0xCA)
+  this->set_display_offset(0x00);                    // No offset (Command 0xD3)
+  this->set_display_start_line(0x00);                // Start line 0 (Command 0xA1)
+  this->set_remap_dual_com_line_mode(0x14, 0x11);    // Horizontal address increment, Disable Dual COM (Command 0xA0)
+  this->set_function_selection(0x01);                // Enable internal VDD (Command 0xAB)
+  this->set_display_enhancement_a(0xA0, 0xFD);       // Default enhancement (Command 0xB4)
+  this->set_contrast_current(0x7F);                  // Mid brightness (Command 0xC1) (other: 0x9F)
+  this->set_master_current_control(0x0F);            // Max range (Command 0xC7)
+  this->set_default_linear_gray_scale_table();       // Standard Gamma (Command 0xB9)
+  this->set_phase_length(0xE2);                      // Phase 1: 5 DCLKs, Phase 2: 14 DCLKs (Command 0xB1)
+  this->set_precharge_voltage(0x1F);                 // 0.60 x VCC (Command 0xBB)
+  this->set_display_mode(0xA6);                      // Normal display mode (Command 0xA6)
+  this->set_vcomh_voltage(0x07);                     // 0.86 x VCC (Command 0xBE)
+  this->set_second_precharge_period(0x08);           // 8 DCLKs (Command 0xB6)
+  // this->set_exit_partial_display();
+  this->fill_ram_256_64(0x00);                       // Clear screen
+  this->set_display_on_off(0xAF);                    // Display ON (Command 0xAF)
+}
+
+
+void SSD1322::send_spi_transaction(uint8_t mode, const uint8_t *data, size_t length) {
+  spi_transaction_t spi_transaction = {};
+  spi_transaction.length = length * 8;
+  spi_transaction.tx_buffer = data;
+
+  gpio_set_level(this->dc, mode);
+  spi_device_polling_transmit(this->spi, &spi_transaction);
+}
+
+void IRAM_ATTR SSD1322::send_spi_transaction_async(uint8_t mode, const uint8_t *data, size_t length, void *display) {
+  // get the next available transaction/config slot from pool
+  spi_transaction_t *transaction = &this->trans_pool[this->curr_trans_idx];
+  ssd1322_trans_config_t *config = &this->trans_config_pool[this->curr_trans_idx];
+
+  // setup the config
+  config->dc_pin = this->dc;
+  config->mode = mode;
+  config->lv_display = display;
+
+  // setup the transaction
+  transaction->length = length * 8;
+  transaction->rxlength = 0;
+  transaction->tx_buffer = data;
+  // store the config
+  transaction->user = (void *)config;
+
+  // queue transaction. pre_cb will set the DC pin
+  spi_device_queue_trans(this->spi, transaction, portMAX_DELAY);
+
+  // increment index
+  this->curr_trans_idx = (this->curr_trans_idx + 1) % this->queue_size;
+}
+
+void SSD1322::send_command(uint8_t d) {
+  this->send_spi_transaction(0, &d, 1);
+}
+
+void SSD1322::send_data(uint8_t d) {
+  this->send_spi_transaction(1, &d, 1);
+}
+
+void SSD1322::send_buffer(const uint8_t *data, size_t length) {
+  this->send_spi_transaction(1, data, length);
+}
+
+void SSD1322::send_buffer_async(const uint8_t *data, size_t length, void *disp) {
+  this->send_spi_transaction_async(1, data, length, disp);
+}
+
+void SSD1322::send_buffer_chunked(uint8_t *data, size_t length, size_t chunk_size) {
+  for (size_t offset = 0; offset < length; offset += chunk_size) {
+    size_t len = (offset + chunk_size <= length) ? chunk_size : (length - offset);
+    this->send_buffer(data + offset, len);
+  }
+}
+
+void SSD1322::send_buffer_chunked_async(uint8_t *data, size_t length, size_t chunk_size, void *disp) {
+  for (size_t offset = 0; offset < length; offset += chunk_size) {
+    size_t len = (offset + chunk_size <= length) ? chunk_size : (length - offset);
+    this->send_buffer_async(data + offset, len, disp);
+  }
 }
 
 void SSD1322::reset_device() {
@@ -136,192 +225,246 @@ void SSD1322::reset_device() {
   vTaskDelay(pdMS_TO_TICKS(300));
 }
 
-// | Resolution | Columns (bytes) | Pixels | Column Address Range | Row Address Range |
-// |------------|-----------------|--------|----------------------|-------------------|
-// | 256 × 64   | 128             | 256    | 0x00 to 0x7F         | 0x00 to 0x3F      |
-// | 480 × 128  | 240             | 480    | 0x00 to 0xEF         | 0x00 to 0x7F      |
-void SSD1322::fill_ram_480_128(unsigned char d) {
-  // the SSD1322 is a 4-bit grayscale display with support up to 480 x 128.
-  // each byte in RAM holds 2 horizontal pixels (because each pixel is 4 bits).
-  // 480 / 2 = 240 bytes per row.
-  this->set_column_address(0x00, 0xEF); // 0xEF = 239 => 240 bytes => 480 pixels
-  this->set_row_address(0x00, 0x7F);    // 0x7F = 127 => 128 rows
+// SSD1322 Memory Mapping Table:
+// +------------+--------+---------+----------------------------+-----------------------+
+// | Resolution | Pixels | Bytes   | Column Address Range       | Row Address Range     |
+// |            |        | Per Row | (Internal Cmd 15h)         | (Internal Cmd 75h)    |
+// +------------+--------+---------+----------------------------+-----------------------+
+// | 480 × 128  | 480 px | 240 B   | 0x00 - 0x77 (Dec: 0 - 119) | 0x00 - 0x7F (0 - 127) |
+// +------------+--------+---------+----------------------------+-----------------------+
+// note: total max RAM for SSD1322 is 120 column addresses (480px) x 128 rows.
+// column addressing: 1 address = 4 pixels (2 bytes)
+// row addressing: 1 address = 1 pixel
+void SSD1322::fill_ram_480_128(uint8_t d) {
+  this->fill_ram(480, 128, 0);
+}
+
+// SSD1322 Centering Table (256x64 Display on 480x128 Controller)
+// +-------------------+--------+---------+--------------------+----------------------+
+// | Feature           | Pixels | Bytes   | Addresses (Col)    | Range (Hex)          |
+// +-------------------+--------+---------+--------------------+----------------------+
+// | Full Controller   | 480 px | 240 B   | 120                | 0x00 to 0x77         |
+// | Left Guard Band   | 112 px | 56 B    | 28                 | 0x00 to 0x1B         |
+// | Visible Screen    | 256 px | 128 B   | 64                 | 0x1C to 0x5B         |
+// | Right Guard Band  | 112 px | 56 B    | 28                 | 0x5C to 0x77         |
+// +-------------------+--------+---------+--------------------+----------------------+
+// | Total             | 480 px | 240 B   | 120                | 0x00 to 0x77         |
+// +-------------------+--------+---------+--------------------+----------------------+
+// note: offset = 112px / 4 pixels per address = 28 (0x1C)
+void SSD1322::fill_ram_256_64(uint8_t d) {
+  this->fill_ram(256, 64, 0);
+}
+
+
+void SSD1322::fill_ram(int cols, int rows, uint8_t d) {
+  // calculate the horizontal offset to center the requested width
+  // example: (480 - 256) / 2 = 112 pixels
+  int pixel_offset = (480 - cols) / 2;
+
+  // convert pixels to addressable window
+  // 1 address = 4 pixels
+  uint8_t start_addr = (uint8_t)(pixel_offset / 4);
+  uint8_t end_addr = (uint8_t)(start_addr + (cols / 4) - 1);
+
+  // set the address window
+  this->set_column_address(start_addr, end_addr);
+  this->set_row_address(0, rows - 1);
   this->set_write_ram();
 
-  for (unsigned char row = 0; row < 128; row++) {
-    for (unsigned char col = 0; col < 240; col++) {
-      // 1 byte = 2 pixels
-      this->send_ssd1322_data(d);
+  // create a line buffer for spi transaction
+  // 2 pixels per byte
+  size_t bytes_per_row = cols / 2;
+  uint8_t* row_buf = (uint8_t*)malloc(bytes_per_row);
+
+  if (row_buf) {
+    memset(row_buf, d, bytes_per_row);
+
+    for (int r = 0; r < rows; r++) {
+      // send the whole row at once
+      this->send_buffer(row_buf, bytes_per_row);
     }
+
+    free(row_buf);
   }
 }
 
-void SSD1322::fill_ram(unsigned char d) {
-  // funciont to fill 256 x 64 pixels.
-  // each byte holds 2 horizontal pixels => 256 / 2 = 128 bytes per row.
-  this->set_column_address(0x00, 0x7F); // 0x7F = 127 => 128 bytes => 256 pixels
-  this->set_row_address(0x00, 0x3F);    // 0x3F = 63 => 64 rows
-  this->set_write_ram();
-
-  for (unsigned char row = 0; row < 64; row++) {
-    for (unsigned char col = 0; col < 128; col++) {
-      this->send_ssd1322_data(d);  // 1 byte = 2 pixels
-    }
-  }
-}
-
-void SSD1322::set_column_address(unsigned char d, unsigned char e) {
-  this->send_ssd1322_command(this->SET_COLUMN_ADDRESS);
-  this->send_ssd1322_data(d); // default => 0x00
-  this->send_ssd1322_data(e); // default => 0x77
+void SSD1322::set_column_address(uint8_t d, uint8_t e) {
+  this->send_command(this->COMMAND::SET_COLUMN_ADDRESS);
+  this->send_data(d); // default => 0x00
+  this->send_data(e); // default => 0x77
 }
 
 void SSD1322::set_write_ram() {
-  this->send_ssd1322_command(this->WRITE_RAM);
+  this->send_command(this->COMMAND::WRITE_RAM);
 }
 
-void SSD1322::set_row_address(unsigned char d, unsigned char e) {
-  this->send_ssd1322_command(this->SET_ROW_ADDRESS);
-  this->send_ssd1322_data(d); // default => 0x00
-  this->send_ssd1322_data(e); // default => 0x7F
+void SSD1322::set_row_address(uint8_t d, uint8_t e) {
+  this->send_command(this->COMMAND::SET_ROW_ADDRESS);
+  this->send_data(d); // default => 0x00
+  this->send_data(e); // default => 0x7F
 }
 
-void SSD1322::set_remap_dual_com_line_mode(unsigned char d) {
-  this->send_ssd1322_command(this->SET_REMAP_DUAL_COM_LINE_MODE);
-  this->send_ssd1322_data(d);    // 0x14 NORMAL, 0x06 FLIP?, 0x16?
-  this->send_ssd1322_data(0x11); // default => 0x01 (Disable Dual COM Mode)
+void SSD1322::set_remap_dual_com_line_mode(uint8_t d, uint8_t e) {
+  this->send_command(this->COMMAND::SET_REMAP_DUAL_COM_LINE_MODE);
+  this->send_data(d); // 0x14 NORMAL, 0x06 FLIP?, 0x16?
+  this->send_data(e); // default => 0x01 (Disable Dual COM Mode)
 }
 
-void SSD1322::set_display_start_line(unsigned char d) {
-  this->send_ssd1322_command(this->SET_DISPLAY_START_LINE);
-  this->send_ssd1322_data(d);
+void SSD1322::set_display_start_line(uint8_t d) {
+  this->send_command(this->COMMAND::SET_DISPLAY_START_LINE);
+  this->send_data(d);
 }
 
-void SSD1322::set_display_offset(unsigned char d) {
-  this->send_ssd1322_command(this->SET_DISPLAY_OFFSET);
-  this->send_ssd1322_data(d);
+void SSD1322::set_display_offset(uint8_t d) {
+  this->send_command(this->COMMAND::SET_DISPLAY_OFFSET);
+  this->send_data(d);
 }
 
-void SSD1322::set_display_mode(unsigned char d) {
-  this->send_ssd1322_command(d);
+void SSD1322::set_display_mode(uint8_t d) {
+  this->send_command(d);
 }
 
 void SSD1322::set_exit_partial_display() {
-  this->send_ssd1322_command(this->EXIT_PARTIAL_DISPLAY);
+  this->send_command(this->COMMAND::EXIT_PARTIAL_DISPLAY);
 }
 
-void SSD1322::set_function_selection(unsigned char d) {
-  this->send_ssd1322_command(this->SET_FUNCTION_SELECTION);
-  this->send_ssd1322_data(d);
+void SSD1322::set_function_selection(uint8_t d) {
+  this->send_command(this->COMMAND::SET_FUNCTION_SELECTION);
+  this->send_data(d);
 }
 
-void SSD1322::set_display_on_off(unsigned char d) {
-  this->send_ssd1322_command(d);
+void SSD1322::set_display_on_off(uint8_t d) {
+  this->send_command(d);
 }
 
-void SSD1322::set_phase_length(unsigned char d) {
-  this->send_ssd1322_command(this->SET_PHASE_LENGTH);
-  this->send_ssd1322_data(d);
+void SSD1322::set_phase_length(uint8_t d) {
+  this->send_command(this->COMMAND::SET_PHASE_LENGTH);
+  this->send_data(d);
 }
 
-void SSD1322::set_front_clock_divider(unsigned char d) {
-  this->send_ssd1322_command(this->SET_FRONT_CLOCK_DIVIDER);
-  this->send_ssd1322_data(d);
+void SSD1322::set_front_clock_divider(uint8_t d) {
+  this->send_command(this->COMMAND::SET_FRONT_CLOCK_DIVIDER);
+  this->send_data(d);
 }
 
-void SSD1322::set_display_enhancement_a(unsigned char d, unsigned char e) {
-  this->send_ssd1322_command(this->DISPLAY_ENHANCEMENT_A);
-  this->send_ssd1322_data(d);
-  this->send_ssd1322_data(e);
+void SSD1322::set_display_enhancement_a(uint8_t d, uint8_t e) {
+  this->send_command(this->COMMAND::DISPLAY_ENHANCEMENT_A);
+  this->send_data(d);
+  this->send_data(e);
+}
+
+void SSD1322::set_second_precharge_period(uint8_t d) {
+  this->send_command(this->COMMAND::SET_SECOND_PRECHARGE_PERIOD);
+  this->send_data(d);
+}
+
+void SSD1322::set_gray_scale_table(const uint8_t* d, size_t l) {
+  this->send_command(this->COMMAND::SET_GRAY_SCALE_TABLE);
+  this->send_buffer(d, l);
+  this->send_command(this->COMMAND::ENABLE_GRAY_SCALE_TABLE);
 }
 
 void SSD1322::set_default_linear_gray_scale_table() {
-  this->send_ssd1322_command(this->SELECT_DEFAULT_LINEAR_GRAY_SCALE_TABLE);
+  this->send_command(this->COMMAND::SELECT_DEFAULT_LINEAR_GRAY_SCALE_TABLE);
 }
 
-void SSD1322::set_precharge_voltage(unsigned char d) {
-  this->send_ssd1322_command(this->SET_PRECHARGE_VOLTAGE);
-  this->send_ssd1322_data(d);
+void SSD1322::set_precharge_voltage(uint8_t d) {
+  this->send_command(this->COMMAND::SET_PRECHARGE_VOLTAGE);
+  this->send_data(d);
 }
 
-void SSD1322::set_vcomh_voltage(unsigned char d) {
-  this->send_ssd1322_command(this->SET_VCOMH_VOLTAGE);
-  this->send_ssd1322_data(d);
+void SSD1322::set_vcomh_voltage(uint8_t d) {
+  this->send_command(this->COMMAND::SET_VCOMH_VOLTAGE);
+  this->send_data(d);
 }
 
-void SSD1322::set_contrast_current(unsigned char d) {
-  this->send_ssd1322_command(this->SET_CONTRAST_CURRENT);
-  this->send_ssd1322_data(d);
+void SSD1322::set_contrast_current(uint8_t d) {
+  this->send_command(this->COMMAND::SET_CONTRAST_CURRENT);
+  this->send_data(d);
 }
 
-void SSD1322::set_master_current_control(unsigned char d) {
-  this->send_ssd1322_command(this->MASTER_CURRENT_CONTROL);
-  this->send_ssd1322_data(d);
+void SSD1322::set_master_current_control(uint8_t d) {
+  this->send_command(this->COMMAND::MASTER_CURRENT_CONTROL);
+  this->send_data(d);
 }
 
-void SSD1322::set_multiplex_ratio(unsigned char d) {
-  this->send_ssd1322_command(this->SET_MULTIPLEX_RATIO);
-  this->send_ssd1322_data(d);
+void SSD1322::set_multiplex_ratio(uint8_t d) {
+  this->send_command(this->COMMAND::SET_MULTIPLEX_RATIO);
+  this->send_data(d);
 }
 
-void SSD1322::set_command_lock(unsigned char d) {
-  this->send_ssd1322_command(this->SET_COMMAND_LOCK);
-  this->send_ssd1322_data(d);
+void SSD1322::set_display_enhancement_b(uint8_t d, uint8_t e) {
+  this->send_command(this->COMMAND::DISPLAY_ENHANCEMENT_B);
+  this->send_data(d);
+  this->send_data(e);
+}
+
+void SSD1322::set_command_lock(uint8_t d) {
+  this->send_command(this->COMMAND::SET_COMMAND_LOCK);
+  this->send_data(d);
 }
 
 void SSD1322::test() {
-  // SSD1322 - 16 gray scale levels supported by embedded 480 x 128 x 4 bit SRAM display buffer
-  // the screen has 256x64 pixels, but each pixel is 4 bits wide.
+  // COORDINATE SETUP
+  // These represent the logical area we want to fill on our specific panel (256x64).
   uint8_t col_start = 0;
-  uint8_t col_end = this->columns - 1;
   uint8_t row_start = 0;
-  uint8_t row_end = this->rows - 1;
+  uint8_t col_end = this->columns - 1;  // 256
+  uint8_t row_end = this->rows - 1;     // 64
 
+  // MEMORY CALCULATION
+  // SSD1322 uses 4 bits per pixel (16 grayscale levels).
+  // This means 2 pixels fit into 1 byte.
+  // Buffer Size = (Total Pixels) / 2
   size_t buffer_size = (this->columns * this->rows) / 2;
   uint8_t* buffer = (uint8_t*)malloc(buffer_size);
+  if (!buffer) return;
 
-  // SSD1322 column addressing basics:
-  // each RAM column (1 byte) = 2 horizontal pixels, each 4 bits wide.
-  // the SSD1322 has 480 columns of pixels, which equals 240 bytes of column RAM.
-  // but the SSD1322 internally maps RAM columns 0x00 to 0x77 (119 bytes) to the left side of the screen, not the full width.
-  // so to center or align a smaller display like 256×64 in the full 480×128 canvas, you often need to add an offset.
+  // HARDWARE WINDOW ADDRESSING
+  // SSD1322 internal RAM is 480 pixels wide (120 addresses).
+  // Each 'Address' increment moves the pointer by 4 horizontal pixels.
+  // We use 'col_offset' to center our 256px screen in the 480px RAM space.
+  uint8_t start_addr = this->col_offset + (col_start / 4);
+  uint8_t end_addr = this->col_offset + (col_end / 4);
 
-  // 0x1C is decimal 28.
-  // this offset shifts your drawing window to align your logical display with the center of the physical screen.
-  // it's a commonly recommended value in the SSD1322 datasheet and initialization examples for 256-pixel-wide displays.
-
-  // so the set_column_address below, maps your logical column 0 (pixel 0) to RAM column 28, which starts drawing more centrally on the actual display.
-
-  // SD1322 RAM:     0  1  2  ...  28  ...  ...  127  ...  238  239
-  // physical px:   <- unused -> [Your 256x64 display] <- unused ->
-  //                             ↑ start drawing here (offset = 0x1C)
-
-  // set address window (SSD1322 expects byte-based column addressing: divide by 2)
-  this->set_column_address(0x1C + (col_start / 4), 0x1C + (col_end / 4));
+  this->set_column_address(start_addr, end_addr);
   this->set_row_address(row_start, row_end);
   this->set_write_ram();
 
-  const int tile_size = 8;
-  const uint8_t grayscales[] = { 0x0, 0x5, 0xA, 0xF };
-  const int num_grayscales = sizeof(grayscales) / sizeof(grayscales[0]);
+  // PATTERN GENERATION
+  const int tile_size = 8; // Size of each checker square in pixels
+  const uint8_t grayscales[] = { 0x0, 0x5, 0xA, 0xF }; // Black, Dark Gray, Light Gray, White
+  const int num_levels = sizeof(grayscales) / sizeof(grayscales[0]);
 
-  int index = 0;
-  for (int row = row_start; row <= row_end; row++) {
-    for (int col = col_start; col <= col_end; col += 2) {
-      // determine tile position
-      int tile_x = col / tile_size;
-      int tile_y = row / tile_size;
+  int buffer_idx = 0;
+  for (int y = row_start; y <= row_end; y++) {
+    // We increment 'x' by 2 because we pack two 4-bit pixels into every 1-byte write
+    for (int x = col_start; x <= col_end; x += 2) {
 
-      // use XOR of tile coords to alternate pattern
-      int checker_index = (tile_x + tile_y) % num_grayscales;
-      uint8_t gray = grayscales[checker_index];
+      // Calculate which "tile" we are currently in
+      int tile_x = x / tile_size;
+      int tile_y = y / tile_size;
 
-      // pack two grayscale pixels into one byte
-      uint8_t pixel_byte = (gray << 4) | gray;
-      buffer[index++] = pixel_byte;
+      // Use the sum of tile coordinates to pick a grayscale level.
+      // This creates the diagonal alternating "checker" effect.
+      int color_idx = (tile_x + tile_y) % num_levels;
+      uint8_t gray_val = grayscales[color_idx];
+
+      /* * PACKING LOGIC:
+       * A single byte in the SSD1322 RAM looks like this: [PX1_Nibble][PX2_Nibble]
+       * Bit 7-4: First Pixel (Left)
+       * Bit 3-0: Second Pixel (Right)
+       */
+      uint8_t packed_byte = (gray_val << 4) | (gray_val & 0x0F);
+      buffer[buffer_idx++] = packed_byte;
     }
   }
 
-  this->send_ssd1322_data_in_chunks(buffer, buffer_size, 2048);
+  // DATA TRANSMISSION
+  // Send the entire generated buffer over SPI.
+  // We use chunked sending to avoid overflowing small SPI DMA buffers (usually 4KB).
+  this->send_buffer_chunked(buffer, buffer_size, 2048);
+
+  // CLEANUP
   free(buffer);
 }

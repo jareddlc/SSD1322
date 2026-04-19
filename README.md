@@ -1,28 +1,21 @@
 # SSD1322
-Driver for SSD1322 OLED
+Driver for SSD1322
 
-## ESP32
+## ESP-IDF
 
-This driver is written for use with the ESP32 platform, however it can be easily ported into different platforms. It is using 4-wire SPI protocol.
+This driver is written for use with the ESP-IDF platform for ESP32. It uses the 4-wire SPI protocol. Make sure the display module is set to 4-wire SPI (may require soldering a resitor).
 
-
-## LVGL
-
-This driver does not have any draw methods as it was intended to be used with [lvgl graphics library](https://lvgl.io/).
+The driver does not have any draw methods, instead it provides methods to easily enable use with [LVGL](https://lvgl.io/).
 
 
-## Modules Pin out
+### Display
 
-| ESP32    | HSPI | VSPI |
-|----------|------|------|
-| CS0      | 15   | 5    |
-| SCLK     | 14   | 18   |
-| MISO     | 12   | 19   |
-| MOSI     | 13   | 23   |
-| QUADWP   | 2    | 22   |
-| QUADHD   | 4    | 21   |
+| Part | Example |
+| :--- | :--- |
+| ESP32-S3 Super Mini | https://www.aliexpress.us/item/3256806984517995.html |
+| 3.12 OLED | https://www.aliexpress.us/item/3256802905135797.html |
 
-| SSD1322 Pin | Description | Description |
+| OLED  Pin   | Description | Description |
 |-------------|-------------|-------------|
 | 01          | GND         | GND         |
 | 02          | VCC         | 3V3         |
@@ -40,6 +33,19 @@ This driver does not have any draw methods as it was intended to be used with [l
 | 14          | D/C#        | Data/Command|
 | 15          | RES#        | Reset       |
 | 16          | CS#         | Chip Select |
+
+### ESP32 SPI pins
+
+| ESP32    | HSPI | VSPI |
+|----------|------|------|
+| CS0      | 15   | 5    |
+| SCLK     | 14   | 18   |
+| MISO     | 12   | 19   |
+| MOSI     | 13   | 23   |
+| QUADWP   | 2    | 22   |
+| QUADHD   | 4    | 21   |
+
+### ESP32-S3 Super Mini
 
 ### Example pinout
 
