@@ -7,6 +7,9 @@ This driver is written for use with the ESP-IDF platform for ESP32. It uses the 
 
 The driver does not have any draw methods, instead it provides methods to easily enable use with [LVGL](https://lvgl.io/).
 
+## Example
+
+There is a [full example](https://github.com/jareddlc/SSD1322/blob/main/example/main/example.cpp) to show how to use this library with esp-idf.
 
 ### Display
 
@@ -33,28 +36,3 @@ The driver does not have any draw methods, instead it provides methods to easily
 | 14          | D/C#        | Data/Command|
 | 15          | RES#        | Reset       |
 | 16          | CS#         | Chip Select |
-
-### ESP32 SPI pins
-
-| ESP32    | HSPI | VSPI |
-|----------|------|------|
-| CS0      | 15   | 5    |
-| SCLK     | 14   | 18   |
-| MISO     | 12   | 19   |
-| MOSI     | 13   | 23   |
-| QUADWP   | 2    | 22   |
-| QUADHD   | 4    | 21   |
-
-### ESP32-S3 Super Mini
-
-### Example pinout
-
-| OLED Module | ESP32 MCU |
-| ----------- | --------- |
-| Pin  1 GND  | GND       |
-| Pin  2 VCC  | 3.3V      |
-| Pin  4 SCLK | GPIO  18  |
-| Pin  5 SDIN | GPIO  23  |
-| Pin 14 DC   | GPIO  16  |
-| Pin 15 RES  | GPIO  17  |
-| Pin 16 CS   | GPIO  5   |
