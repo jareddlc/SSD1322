@@ -20,8 +20,10 @@ static constexpr uint16_t SCREEN_HEIGHT = 64;
 SSD1322 oled(DisplayPins::CS, DisplayPins::DC, DisplayPins::RES, DisplayPins::SCLK, DisplayPins::MOSI, SPI3_HOST);
 
 extern "C" void app_main() {
-  // init OLED
-  oled.init(SCREEN_WIDTH, SCREEN_HEIGHT, nullptr);
+  // init OLED asynchronously
+  oled.init(SCREEN_WIDTH, SCREEN_HEIGHT, ssd1322_lvgl_post_cb);
+  // or synchronously
+  // oled.init(SCREEN_WIDTH, SCREEN_HEIGHT, nullptr);
 
   // run test if LVGL is not detected
   #ifndef SSD1322_HAS_LVGL
@@ -74,6 +76,12 @@ extern "C" void app_main() {
   lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
   lv_obj_center(label);
 
+  // create bar
+  lv_obj_t * bar = lv_bar_create(screen);
+  lv_obj_set_size(bar, 256, 10);
+  lv_obj_set_pos(bar, 0, 0);
+  lv_bar_set_value(bar, 100, LV_ANIM_OFF);
+
   // create timer
   const esp_timer_create_args_t tick_timer_args = {
     .callback = [](void* arg) { lv_tick_inc(5); },
@@ -86,9 +94,13 @@ extern "C" void app_main() {
   esp_timer_create(&tick_timer_args, &tick_timer);
   esp_timer_start_periodic(tick_timer, 5000); // 5000 microseconds = 5ms
 
-  while (1) {
-    // handle LVGL tasks and get time until next call
-    uint32_t ms_until_next = lv_timer_handler();
-    vTaskDelay(pdMS_TO_TICKS(ms_until_next > 0 ? ms_until_next : 1));
+  uint8_t value = 0;
+  while (true) {
+    value++;
+    if (value > 100) value = 0;
+    lv_bar_set_value(bar, value, LV_ANIM_OFF);
+
+    lv_timer_handler();
+    vTaskDelay(pdMS_TO_TICKS(20));
   }
 }
