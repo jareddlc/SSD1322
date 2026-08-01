@@ -1,5 +1,5 @@
-# SSD1322
-Driver for SSD1322
+# ESP-SSD1322
+ESP Driver for SSD1322 with LVGL
 
 ## ESP-IDF
 
