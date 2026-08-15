@@ -21,7 +21,7 @@ typedef void (*spi_callback_t)(spi_transaction_t *t);
 class SSD1322 {
 public:
   SSD1322(int cs, int dc, int reset, int sclk, int sdin, int spi_host);
-  void init(int columns, int rows, spi_callback_t post_cb = nullptr);
+  void init(int columns, int rows, spi_callback_t post_cb = nullptr, int clock_speed_hz = SPI_MASTER_FREQ_8M);
   void init_sequence();
   void init_sequence_datasheet();
 

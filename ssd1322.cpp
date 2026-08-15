@@ -19,7 +19,7 @@ SSD1322::SSD1322(int cs, int dc, int reset, int sclk, int sdin, int spi_host) {
   this->spi_host = spi_host;
 }
 
-void SSD1322::init(int columns, int rows, spi_callback_t post_cb) {
+void SSD1322::init(int columns, int rows, spi_callback_t post_cb, int clock_speed_hz) {
   // set oled size
   this->columns = columns;
   this->rows = rows;
@@ -61,7 +61,7 @@ void SSD1322::init(int columns, int rows, spi_callback_t post_cb) {
   // create SPI device
   spi_device_interface_config_t devcfg = {};
   devcfg.spics_io_num = this->cs;
-  devcfg.clock_speed_hz = SPI_MASTER_FREQ_20M; //SPI_MASTER_FREQ_8M
+  devcfg.clock_speed_hz = clock_speed_hz; // 8 MHz is conservative for jumper wires, 20 MHz for soldered
   devcfg.mode = 0;
   devcfg.clock_source = SPI_CLK_SRC_DEFAULT; // SOC_MOD_CLK_APB;
   devcfg.address_bits = 0;
@@ -116,8 +116,8 @@ void SSD1322::init_sequence() {
   this->set_master_current_control(0x0F);            // Max: 0x0F
 
   // voltage and phase (fine-tuned for sharpe edges)
-  this->set_phase_length(0x32);                      // Sharpens pixel transitions
-  this->set_second_precharge_period(0); // 0x08
+  this->set_phase_length(0xE2);                     // Sharpens pixel transitions. Other: 0x32
+  this->set_second_precharge_period(0x08);          // Other: 0
   this->set_precharge_voltage(0x1F);                // 0.6*VCC
   this->set_vcomh_voltage(0x07);                    // 0.86*VCC - Keeps blacks deep
 
